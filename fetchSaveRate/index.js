@@ -40,6 +40,21 @@ function writePriceToDB(priceInfo) {
 }
 
 
+function readPricesFromDB(limit, currency) {
+    const params = {
+        TableName: 'bitRate',
+        Limit: limit,
+        KeyConditionExpression: 'currency = :currency',
+        ScanIndexForward: false,
+        ExpressionAttributeValues: {
+            ':currency': currency
+        }
+    };
+
+    return dDBClient.query(params).promise();
+}
+
+
 exports.handler = async (event, context, callback) => {
 
     let response = {
@@ -47,27 +62,73 @@ exports.handler = async (event, context, callback) => {
         "headers": { "Access-Control-Allow-Origin": "*" }
     };
 
-    // write btc price to db when invoked by aws scheduled events (every 5 min)
-    const data = await fetchPrice('btc');
+    const isScheduledEvent = event.source === 'aws.events';
+    const supportedCurrencies = ['btc'];
 
-    const priceInfo = {
-        currency: 'btc',
-        lastPrice: data.last_price,
-        low: data.low,
-        high: data.high,
-        timestamp: data.timestamp
-    };
+    if (isScheduledEvent) {
+        // write btc price to db when invoked by aws scheduled events (every 5 min)
+        const data = await fetchPrice('btc');
 
-    await writePriceToDB(priceInfo).then(() => {
-        callback(null, {
-            ...response,
-            statusCode: 201,
-            body: { message: 'Prices saved!', item: priceInfo }
+        const priceInfo = {
+            currency: 'btc',
+            lastPrice: data.last_price,
+            low: data.low,
+            high: data.high,
+            timestamp: data.timestamp
+        };
+
+        await writePriceToDB(priceInfo).then(() => {
+            callback(null, {
+                ...response,
+                statusCode: 201,
+                body: { message: 'Prices saved!', item: priceInfo }
+            });
+        }).catch((err) => {
+            console.error(err);
+            throw new Error(err);
         });
-    }).catch((err) => {
-        console.error(err);
-        throw new Error(err);
-    });
 
+    }
+    else {
+        // serve http api requests
+        let limit;
+        let currency = event.path.split('/')[2];
 
+        if (!supportedCurrencies.includes(currency)) {
+            callback(null, {
+                ...response,
+                body: JSON.stringify({
+                    data: [],
+                    message: 'Unsupported currency'
+                })
+            });
+        }
+
+        console.log('Event path' + event.path);
+
+        switch (event.path) {
+            case `/prices/${currency}/latest`:
+            case `/prices/${currency}/latest/`:
+                limit = 1;
+                break;
+            case `/prices/${currency}`:
+            case `/prices/${currency}/`:
+                limit = 12;
+                break;
+            default:
+                limit = 12;
+        }
+
+        await readPricesFromDB(limit, currency).then(data => {
+            callback(null, {
+                ...response,
+                body: JSON.stringify({
+                    data: data.Items
+                })
+            });
+        }).catch((err) => {
+            console.error(err);
+        });
+
+    }
 };
